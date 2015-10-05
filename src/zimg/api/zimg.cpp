@@ -591,3 +591,214 @@ zimg_filter_graph *zimg_filter_graph_build(const zimg_image_format *src_format, 
 		return nullptr;
 	}
 }
+
+
+// Hidden advanced graph API for VapourSynth.
+#ifdef ZIMG_VAPOURSYNTH_EDITION
+extern "C" {;
+
+#define EX_BEGIN \
+  zimg_error_code_e ret = ZIMG_ERROR_SUCCESS; \
+  try {
+#define EX_END \
+  } catch (const zimg::error::Exception &) { \
+    ret = handle_exception(std::current_exception()); \
+  } \
+  return ret;
+
+struct _zimg_graph_builder : public zimg::graph::GraphBuilder {};
+
+typedef struct _zimg_colorspace_params {
+	unsigned version;
+	zimg_matrix_coefficients_e matrix;
+	zimg_transfer_characteristics_e transfer;
+	zimg_color_primaries_e primaries;
+} _zimg_colorspace_params;
+
+typedef struct _zimg_depth_params {
+	unsigned version;
+	zimg_pixel_type_e type;
+	unsigned depth;
+	zimg_pixel_range_e range;
+} _zimg_depth_params;
+
+typedef struct _zimg_resize_params {
+	unsigned version;
+	unsigned dst_width;
+	unsigned dst_height;
+	unsigned subsample_w;
+	unsigned subsample_h;
+	double shift_w;
+	double shift_h;
+	double subwidth;
+	double subheight;
+	zimg_chroma_location_e chroma_location;
+} _zimg_resize_params;
+
+_zimg_graph_builder *_zimg_graph_builder_create(void)
+{
+	try {
+		return new _zimg_graph_builder{};
+	} catch (const zimg::error::Exception &) {
+		handle_exception(std::current_exception());
+		return nullptr;
+	} catch (const std::bad_alloc &e) {
+		handle_exception(e);
+		return nullptr;
+	}
+}
+
+void _zimg_graph_builder_free(_zimg_graph_builder *ptr)
+{
+	delete ptr;
+}
+
+zimg_error_code_e _zimg_graph_builder_set_source(_zimg_graph_builder *ptr, const zimg_image_format *format)
+{
+	_zassert_d(ptr, "null pointer");
+	_zassert_d(format, "null pointer");
+
+	EX_BEGIN
+	auto state = import_graph_state(*format, *format);
+	ptr->set_source(state.first);
+	EX_END
+}
+
+zimg_error_code_e _zimg_graph_builder_colorspace(_zimg_graph_builder *ptr, const _zimg_colorspace_params *csp_params, const zimg_graph_builder_params *params)
+{
+	_zassert_d(ptr, "null pointer");
+	_zassert_d(csp_params, "null pointer");
+	API_VERSION_ASSERT(csp_params->version);
+
+	EX_BEGIN
+	zimg::graph::GraphBuilder::params graph_params;
+	zimg::graph::DefaultFilterFactory factory;
+
+	zimg::colorspace::ColorspaceDefinition csp{};
+
+	if (csp_params->version >= API_VERSION_2_0) {
+		csp.matrix = translate_matrix(csp_params->matrix);
+		csp.transfer = translate_transfer(csp_params->transfer);
+		csp.primaries = translate_primaries(csp_params->primaries);
+	}
+
+	if (params)
+		graph_params = import_graph_params(*params);
+
+	ptr->set_factory(&factory).
+	     user_convert_colorspace(csp, params ? &graph_params : nullptr).
+	     set_factory(nullptr);
+	EX_END
+}
+
+zimg_error_code_e _zimg_graph_builder_depth(_zimg_graph_builder *ptr, const _zimg_depth_params *depth_params, const zimg_graph_builder_params *params)
+{
+	_zassert_d(ptr, "null pointer");
+	_zassert_d(depth_params, "null pointer");
+	API_VERSION_ASSERT(depth_params->version);
+
+	EX_BEGIN
+	zimg::graph::GraphBuilder::params graph_params;
+	zimg::graph::DefaultFilterFactory factory;
+
+	zimg::PixelFormat format{};
+
+	if (depth_params->version >= API_VERSION_2_0) {
+		format.type = translate_pixel_type(depth_params->type);
+		format.depth = depth_params->depth;
+		format.fullrange = translate_pixel_range(depth_params->range);
+		format.ycgco = ptr->get_state().colorspace.matrix == zimg::colorspace::MatrixCoefficients::MATRIX_YCGCO;
+	}
+
+	if (params)
+		graph_params = import_graph_params(*params);
+
+	ptr->set_factory(&factory).
+	     user_convert_depth(format, params ? &graph_params : nullptr).
+	     set_factory(nullptr);
+	EX_END
+}
+
+zimg_error_code_e _zimg_graph_builder_resize(_zimg_graph_builder *ptr, const _zimg_resize_params *resize_params, const zimg_graph_builder_params *params)
+{
+	_zassert_d(ptr, "null pointer");
+	_zassert_d(resize_params, "null pointer");
+	API_VERSION_ASSERT(resize_params->version);
+
+	EX_BEGIN
+	zimg::graph::GraphBuilder::params graph_params;
+	zimg::graph::DefaultFilterFactory factory;
+
+	zimg::graph::GraphBuilder::resize_spec spec{};
+
+	if (resize_params->version >= API_VERSION_2_0) {
+		spec.width = resize_params->dst_width;
+		spec.height = resize_params->dst_height;
+		spec.subsample_w = resize_params->subsample_w;
+		spec.subsample_h = resize_params->subsample_h;
+		spec.shift_w = resize_params->shift_w;
+		spec.shift_h = resize_params->shift_h;
+		spec.subwidth = resize_params->subwidth;
+		spec.subheight = resize_params->subheight;
+
+		std::tie(spec.chroma_location_w, spec.chroma_location_h) = translate_chroma_location(resize_params->chroma_location);
+	}
+
+	if (params)
+		graph_params = import_graph_params(*params);
+
+	ptr->set_factory(&factory).
+	     user_convert_resize(spec, params ? &graph_params : nullptr).
+	     set_factory(nullptr);
+	EX_END
+}
+
+zimg_error_code_e _zimg_graph_builder_unresize(_zimg_graph_builder *ptr, const _zimg_resize_params *resize_params, const zimg_graph_builder_params *params)
+{
+	_zassert_d(ptr, "null pointer");
+	_zassert_d(resize_params, "null pointer");
+	API_VERSION_ASSERT(resize_params->version);
+
+	EX_BEGIN
+	zimg::graph::GraphBuilder::params graph_params;
+	zimg::graph::DefaultFilterFactory factory;
+
+	zimg::graph::GraphBuilder::resize_spec spec{};
+
+	if (resize_params->version >= API_VERSION_2_0) {
+		spec.width = resize_params->dst_width;
+		spec.height = resize_params->dst_height;
+		spec.subsample_w = resize_params->subsample_w;
+		spec.subsample_h = resize_params->subsample_h;
+		spec.shift_w = resize_params->shift_w;
+		spec.shift_h = resize_params->shift_h;
+		spec.subwidth = resize_params->subwidth;
+		spec.subheight = resize_params->subheight;
+
+		std::tie(spec.chroma_location_w, spec.chroma_location_h) = translate_chroma_location(resize_params->chroma_location);
+	}
+
+	if (params)
+		graph_params = import_graph_params(*params);
+
+	ptr->set_factory(&factory).
+	     user_convert_unresize(spec, params ? &graph_params : nullptr).
+	     set_factory(nullptr);
+	EX_END
+}
+
+zimg_error_code_e _zimg_graph_builder_complete_graph(_zimg_graph_builder *ptr, zimg_filter_graph **graph)
+{
+	_zassert_d(ptr, "null pointer");
+	_zassert_d(graph, "null pointer");
+
+	EX_BEGIN
+	*graph = ptr->complete_graph().release();
+	EX_END
+}
+
+#undef EX_BEGIN
+#undef EX_END
+
+} // extern "C"
+#endif // ZIMG_VAPOURSYNTH_EDITION

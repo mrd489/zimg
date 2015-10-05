@@ -9,6 +9,7 @@
 #include "colorspace/colorspace.h"
 #include "depth/depth.h"
 #include "resize/resize.h"
+#include "unresize/unresize.h"
 
 namespace zimg {;
 
@@ -52,6 +53,13 @@ public:
 	 * @see create_colorspace
 	 */
 	virtual filter_list create_resize(const resize::ResizeConversion &conv) = 0;
+
+	/**
+	 * Create filters implementing unresizing.
+	 *
+	 * @see create_colorspace
+	 */
+	virtual filter_list create_unresize(const unresize::UnresizeConversion &conv) = 0;
 };
 
 /**
@@ -64,6 +72,8 @@ public:
 	filter_list create_depth(const depth::DepthConversion &conv) override;
 
 	filter_list create_resize(const resize::ResizeConversion &conv) override;
+
+	filter_list create_unresize(const unresize::UnresizeConversion &conv) override;
 };
 
 
@@ -125,7 +135,7 @@ public:
 		ChromaLocationW chroma_location_w;
 		ChromaLocationH chroma_location_h;
 	};
-private:
+
 	struct resize_spec {
 		unsigned width;
 		unsigned height;
@@ -142,7 +152,7 @@ private:
 
 		explicit resize_spec(const state &state);
 	};
-
+private:
 	std::unique_ptr<FilterGraph> m_graph;
 	FilterFactory *m_factory;
 	state m_state;
@@ -161,6 +171,8 @@ private:
 	void convert_depth(const PixelFormat &format, const params *params);
 
 	void convert_resize(const resize_spec &spec, const params *params);
+
+	void convert_unresize(const resize_spec &spec, const params *params);
 public:
 	/**
 	 * Default construct GraphBuilder, creating a builder that manages no graph.
@@ -171,6 +183,13 @@ public:
 	 * Destroy builder.
 	 */
 	~GraphBuilder();
+
+	/**
+	 * Get the current graph state.
+	 *
+	 * @return state
+	 */
+	const state &get_state() const;
 
 	/**
 	 * Set filter factory used by builder.
@@ -196,6 +215,42 @@ public:
 	 * @return reference to self
 	 */
 	GraphBuilder &connect_graph(const state &target, const params *params);
+
+	/**
+	 * Explicitly convert to target colorspace.
+	 *
+	 * @param colorspace colorspace
+	 * @param params filter creation parameters
+	 * @return reference to self
+	 */
+	GraphBuilder &user_convert_colorspace(const colorspace::ColorspaceDefinition &colorspace, const params *params);
+
+	/**
+	 * Explicitly convert to target pixel format.
+	 *
+	 * @param format pixel format
+	 * @param params filter creation parameters
+	 * @return reference to self
+	 */
+	GraphBuilder &user_convert_depth(const PixelFormat &format, const params *params);
+
+	/**
+	 * Explicitly apply a resizing operation.
+	 *
+	 * @param spec resize spec
+	 * @param params filter creation parameters
+	 * @return reference to self
+	 */
+	GraphBuilder &user_convert_resize(const resize_spec &spec, const params *params);
+
+	/**
+	 * Explicitly apply an unresizing operation.
+	 *
+	 * @param spec resize spec
+	 * @param params filter creation parameters
+	 * @return reference to self
+	 */
+	GraphBuilder &user_convert_unresize(const resize_spec &spec, const params *params);
 
 	/**
 	 * Finalize and return managed graph.

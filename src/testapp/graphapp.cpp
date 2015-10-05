@@ -68,6 +68,19 @@ public:
 
 		return zimg::graph::DefaultFilterFactory::create_resize(conv);
 	}
+
+	filter_list create_unresize(const zimg::unresize::UnresizeConversion &conv) override
+	{
+		printf("unresize: [%d, %d] => [%d, %d] (%f, %f)\n",
+		       conv.up_width,
+		       conv.up_height,
+		       conv.orig_width,
+		       conv.orig_height,
+		       conv.shift_w,
+		       conv.shift_h);
+
+		return zimg::graph::DefaultFilterFactory::create_unresize(conv);
+	}
 };
 
 

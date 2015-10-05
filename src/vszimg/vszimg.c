@@ -28,6 +28,53 @@
   #error zAPI v2 or greater required
 #endif
 
+#ifdef ZIMG_VAPOURSYNTH_EDITION
+typedef struct _zimg_graph_builder _zimg_graph_builder;
+
+typedef struct _zimg_colorspace_params {
+	unsigned version;
+	zimg_matrix_coefficients_e matrix;
+	zimg_transfer_characteristics_e transfer;
+	zimg_color_primaries_e primaries;
+} _zimg_colorspace_params;
+
+typedef struct _zimg_depth_params {
+	unsigned version;
+	zimg_pixel_type_e type;
+	unsigned depth;
+	zimg_pixel_range_e range;
+} _zimg_depth_params;
+
+typedef struct _zimg_resize_params {
+	unsigned version;
+	unsigned dst_width;
+	unsigned dst_height;
+	unsigned subsample_w;
+	unsigned subsample_h;
+	double shift_w;
+	double shift_h;
+	double subwidth;
+	double subheight;
+	zimg_chroma_location_e chroma_location;
+} _zimg_resize_params;
+
+_zimg_graph_builder *_zimg_graph_builder_create(void);
+
+void _zimg_graph_builder_free(_zimg_graph_builder *ptr);
+
+zimg_error_code_e _zimg_graph_builder_set_source(_zimg_graph_builder *ptr, const zimg_image_format *format);
+
+zimg_error_code_e _zimg_graph_builder_colorspace(_zimg_graph_builder *ptr, const _zimg_colorspace_params *csp_params, const zimg_graph_builder_params *params);
+
+zimg_error_code_e _zimg_graph_builder_depth(_zimg_graph_builder *ptr, const _zimg_depth_params *depth_params, const zimg_graph_builder_params *params);
+
+zimg_error_code_e _zimg_graph_builder_resize(_zimg_graph_builder *ptr, const _zimg_resize_params *resize_params, const zimg_graph_builder_params *params);
+
+zimg_error_code_e _zimg_graph_builder_unresize(_zimg_graph_builder *ptr, const _zimg_resize_params *resize_params, const zimg_graph_builder_params *params);
+
+zimg_error_code_e _zimg_graph_builder_complete_graph(_zimg_graph_builder *ptr, zimg_filter_graph **graph);
+#endif /* ZIMG_VAPOURSYNTH_EDITION */
+
 #include "VapourSynth.h"
 #include "VSHelper.h"
 
@@ -125,7 +172,8 @@ static const struct string_table_entry g_resample_filter_table[] = {
 	{ "bicubic",  ZIMG_RESIZE_BICUBIC },
 	{ "spline16", ZIMG_RESIZE_SPLINE16 },
 	{ "spline36", ZIMG_RESIZE_SPLINE36 },
-	{ "lanczos",  ZIMG_RESIZE_LANCZOS }
+	{ "lanczos",  ZIMG_RESIZE_LANCZOS },
+	{ "unresize", INT_MIN }
 };
 
 
@@ -1116,6 +1164,224 @@ fail:
 	free(data);
 }
 
+
+#ifdef ZIMG_VAPOURSYNTH_EDITION
+struct vssubresize_data {
+	zimg_filter_graph *graph;
+	VSNodeRef *node;
+	VSVideoInfo vi;
+};
+
+static void _vssubresize_default_init(struct vssubresize_data *data)
+{
+	memset(data, 0, sizeof(*data));
+
+	data->graph = NULL;
+	data->node = NULL;
+}
+
+static void _vssubresize_destroy(struct vssubresize_data *data, const VSAPI *vsapi)
+{
+	if (!data)
+		return;
+
+	zimg_filter_graph_free(data->graph);
+	vsapi->freeNode(data->node);
+}
+
+static void VS_CC vssubresize_init(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi)
+{
+	struct vssubresize_data *data = *instanceData;
+	vsapi->setVideoInfo(&data->vi, 1, node);
+}
+
+static const VSFrameRef * VS_CC vssubresize_get_frame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi)
+{
+#define FAIL_ZIMG() do { format_zimg_error(err_msg, sizeof(err_msg)); goto fail; } while (0)
+	struct vssubresize_data *data = *instanceData;
+	const VSFrameRef *src_frame = NULL;
+	VSFrameRef *dst_frame = NULL;
+	VSFrameRef *ret = NULL;
+	void *tmp = NULL;
+
+	char err_msg[1024];
+	int err_flag = 1;
+
+	if (activationReason == arInitial) {
+		vsapi->requestFrameFilter(n, data->node, frameCtx);
+	} else if (activationReason == arAllFramesReady) {
+		zimg_image_buffer_const src_buf = { ZIMG_API_VERSION };
+		zimg_image_buffer dst_buf = { ZIMG_API_VERSION };
+		size_t tmp_size;
+
+		src_frame = vsapi->getFrameFilter(n, data->node, frameCtx);
+		dst_frame = vsapi->newVideoFrame(data->vi.format, data->vi.width, data->vi.height, src_frame, core);
+
+		import_frame_as_read_buffer(src_frame, &src_buf, ZIMG_BUFFER_MAX, vsapi);
+		import_frame_as_write_buffer(dst_frame, &dst_buf, ZIMG_BUFFER_MAX, vsapi);
+
+		if (zimg_filter_graph_get_tmp_size(data->graph, &tmp_size)) {
+			format_zimg_error(err_msg, sizeof(err_msg));
+			goto fail;
+		}
+
+		VS_ALIGNED_MALLOC(&tmp, tmp_size, 64);
+		if (!tmp) {
+			sprintf(err_msg, "error allocating temporary buffer");
+			goto fail;
+		}
+
+		if (zimg_filter_graph_process(data->graph, &src_buf, &dst_buf, tmp, NULL, NULL, NULL, NULL)) {
+			format_zimg_error(err_msg, sizeof(err_msg));
+			goto fail;
+		}
+
+		ret = dst_frame;
+		dst_frame = NULL;
+	}
+
+	err_flag = 0;
+fail:
+	if (err_flag)
+		vsapi->setFilterError(err_msg, frameCtx);
+
+	vsapi->freeFrame(src_frame);
+	vsapi->freeFrame(dst_frame);
+	VS_ALIGNED_FREE(tmp);
+	return ret;
+#undef FAIL_ZIMG
+}
+
+static void VS_CC vssubresize_free(void *instanceData, VSCore *core, const VSAPI *vsapi)
+{
+	struct vssubresize_data *data = instanceData;
+	_vssubresize_destroy(data, vsapi);
+	free(data);
+}
+
+static void VS_CC vssubresize_create(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi)
+{
+	struct vssubresize_data *data = NULL;
+	_zimg_graph_builder *builder = NULL;
+
+	const VSVideoInfo *node_vi;
+	const VSFormat *node_fmt;
+
+	zimg_image_format src_format;
+	zimg_graph_builder_params params;
+	_zimg_resize_params resize_params = { ZIMG_API_VERSION };
+	vszimg_bool unresize = VSZIMG_FALSE;
+
+	char err_msg[1024];
+	int width;
+	int height;
+
+#define FAIL_BAD_VALUE(name) \
+  do { \
+    sprintf(err_msg, "%s: bad value", (name)); \
+    goto fail; \
+  } while (0)
+
+#define FAIL_ZIMG() do { format_zimg_error(err_msg, sizeof(err_msg)); goto fail; } while (0)
+
+#define TRY_GET_ENUM_STR(name, out, table) \
+  do { \
+    int enum_tmp; \
+    vszimg_bool flag; \
+    if (tryGetEnumStr(vsapi, in, (name), &enum_tmp, &flag, (table), ARRAY_SIZE((table)))) \
+      FAIL_BAD_VALUE(name); \
+    if ((flag)) \
+      (out) = enum_tmp; \
+  } while (0)
+
+	zimg_image_format_default(&src_format, ZIMG_API_VERSION);
+	zimg_graph_builder_params_default(&params, ZIMG_API_VERSION);
+
+	if (!(data = malloc(sizeof(*data)))) {
+		sprintf(err_msg, "error allocating vssubresize_data");
+		goto fail;
+	}
+
+	_vssubresize_default_init(data);
+
+	data->node = vsapi->propGetNode(in, "clip", 0, NULL);
+	node_vi = vsapi->getVideoInfo(data->node);
+	node_fmt = node_vi->format;
+
+	if (!isConstantFormat(node_vi)) {
+		sprintf(err_msg, "clip must have constant format");
+		goto fail;
+	}
+	if (node_fmt->colorFamily == cmCompat) {
+		sprintf(err_msg, "COMPAT color family not supported");
+		goto fail;
+	}
+
+	if (propGetUintDef(vsapi, in, "width", &width, 0))
+		FAIL_BAD_VALUE("width");
+	if (propGetUintDef(vsapi, in, "height", &height, 0))
+		FAIL_BAD_VALUE("height");
+
+	resize_params.dst_width = width;
+	resize_params.dst_height = height;
+	resize_params.subsample_w = node_fmt->subSamplingW;
+	resize_params.subsample_h = node_fmt->subSamplingH;
+	resize_params.shift_w = propGetFloatDef(vsapi, in, "shift_w", 0.0);
+	resize_params.shift_h = propGetFloatDef(vsapi, in, "shift_h", 0.0);
+	resize_params.subwidth = propGetFloatDef(vsapi, in, "subwidth", node_vi->width);
+	resize_params.subheight = propGetFloatDef(vsapi, in, "subheight", node_vi->height);
+
+	TRY_GET_ENUM_STR("resample_filter", params.resample_filter, g_resample_filter_table);
+	params.filter_param_a = propGetFloatDef(vsapi, in, "filter_param_a", params.filter_param_a);
+	params.filter_param_b = propGetFloatDef(vsapi, in, "filter_param_b", params.filter_param_b);
+
+	if (params.resample_filter == INT_MIN) {
+		params.resample_filter = ZIMG_RESIZE_BILINEAR;
+		unresize = VSZIMG_TRUE;
+	}
+
+	TRY_GET_ENUM_STR("dither_type", params.dither_type, g_dither_type_table);
+	TRY_GET_ENUM_STR("cpu_type", params.cpu_type, g_cpu_type_table);
+
+	data->vi = *node_vi;
+	data->vi.width = resize_params.dst_width;
+	data->vi.height = resize_params.dst_height;
+
+	src_format.width = node_vi->width;
+	src_format.height = node_vi->height;
+
+	if (translate_vsformat(node_fmt, &src_format, err_msg))
+		goto fail;
+
+	if (!(builder = _zimg_graph_builder_create()))
+		FAIL_ZIMG();
+	if (_zimg_graph_builder_set_source(builder, &src_format))
+		FAIL_ZIMG();
+
+	if (unresize && _zimg_graph_builder_unresize(builder, &resize_params, &params))
+		FAIL_ZIMG();
+	if (!unresize && _zimg_graph_builder_resize(builder, &resize_params, &params))
+		FAIL_ZIMG();
+
+	if (_zimg_graph_builder_complete_graph(builder, &data->graph))
+		FAIL_ZIMG();
+
+	_zimg_graph_builder_free(builder);
+	builder = NULL;
+#undef FAIL_BAD_VALUE
+#undef FAIL_ZIMG
+#undef TRY_GET_ENUM_STR
+
+	vsapi->createFilter(in, out, "Subresize", vssubresize_init, vssubresize_get_frame, vssubresize_free, fmParallel, 0, data, core);
+	return;
+fail:
+	vsapi->setError(out, err_msg);
+	_zimg_graph_builder_free(builder);
+	_vssubresize_destroy(data, vsapi);
+	free(data);
+}
+#endif /* ZIMG_VAPOURSYNTH_EDITION */
+
 VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin)
 {
 #define INT_OPT(x) #x":int:opt;"
@@ -1145,6 +1411,23 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
 		FLOAT_OPT(filter_param_b_uv)
 		DATA_OPT(dither_type)
 		DATA_OPT(cpu_type);
+
+#ifdef ZIMG_VAPOURSYNTH_EDITION
+	static const char SUBRESIZE_DEFINITION[] =
+		"clip:clip;"
+		"width:int;"
+		"height:int;"
+		FLOAT_OPT(shift_w)
+		FLOAT_OPT(shift_h)
+		FLOAT_OPT(subwidth)
+		FLOAT_OPT(subheight)
+		DATA_OPT(resample_filter)
+		FLOAT_OPT(filter_param_a)
+		FLOAT_OPT(filter_param_b)
+		DATA_OPT(dither_type)
+		DATA_OPT(cpu_type);
+#endif /* ZIMG_VAPOURSYNTH_EDITION */
+
 #undef INT_OPT
 #undef FLOAT_OPT
 #undef DATA_OPT
@@ -1156,4 +1439,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
 	configFunc("the.weather.channel", "z", "batman", VAPOURSYNTH_API_VERSION, 1, plugin);
 
 	registerFunc("Format", FORMAT_DEFINITION, vszimg_create, NULL, plugin);
+#ifdef ZIMG_VAPOURSYNTH_EDITION
+	registerFunc("Subresize", SUBRESIZE_DEFINITION, vssubresize_create, NULL, plugin);
+#endif /* ZIMG_VAPOURSYNTH_EDITION */
 }

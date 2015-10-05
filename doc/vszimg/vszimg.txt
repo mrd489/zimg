@@ -24,13 +24,28 @@ SYNOPSIS:
              float "filter_param_b_uv",
              string "dither_type")
 
+    z.Subresize(clip clip,
+                int width,
+                int height,
+                float "shift_w",
+                float "shift_h",
+                float "subwidth",
+                float "subheight",
+                string "resample_filter",
+                float "filter_param_a",
+                float "filter_param_b",
+                string "dither_type")
+
 DESCRIPTION:
-    The "z" plugin is a drop-in replacement for the built-in VapourSynth
-    resize.X functions. It converts a clip of known or unknown format to
-    another clip of known or unknown format, changing only the parameters
-    specified by the user. Arguments denoted as type "enum" may be specified
-    by numerical index (see ITU-T H.265 Annex E.3) or by name. Enums specified
-    by name have their argument name suffixed with "_s".
+    z.Format is a drop-in replacement for the built-in VapourSynth resize
+    functions. It converts a clip of known or unknown format to another clip
+    of known or unknown format, changing only the parameters specified by the
+    user. z.Subresize provides advanced resampling capabilities intended for
+    use by script writers.
+
+    Arguments denoted as type "enum" may be specified by numerical index
+    (see ITU-T H.265 Annex E.3) or by name. Enums specified by name have their
+    argument name suffixed with "_s".
 
     clip:                   input clip
         The input may be of COMPAT color family (requires VS R28).
@@ -81,6 +96,18 @@ DESCRIPTION:
 
     dither_type:            dithering method
         Dithering is used only for conversions resulting in an integer format.
+
+    shift_w,
+    shift_h:                offset of image top-left corner
+        The top-left image corner is assumed to be at coordinate (0, 0) and
+        the first sample centered at coordinate (0.5, 0.5). An offset may be
+        applied to the assumed image origin to "shift" the image.
+
+    subwidth,
+    subheight:              fractional dimensions of input image
+        The input image is assumed to span from its origin a distance equal to
+        its dimensions in pixels. An alternative image resolution may be
+        specified.
 
     The following tables list values of selected colorspace enumerations and
     their abbreviated names. For all possible values, see ITU-T H.265.

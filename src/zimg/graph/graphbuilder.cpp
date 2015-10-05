@@ -188,6 +188,14 @@ auto DefaultFilterFactory::create_resize(const resize::ResizeConversion &conv) -
 	return list;
 }
 
+auto DefaultFilterFactory::create_unresize(const unresize::UnresizeConversion &conv) -> filter_list
+{
+	auto filter_pair = conv.create();
+
+	std::unique_ptr<ImageFilter> filters[2] = { std::move(filter_pair.first), std::move(filter_pair.second) };
+	return{ std::make_move_iterator(filters), std::make_move_iterator(filters + 2) };
+}
+
 
 GraphBuilder::resize_spec::resize_spec(const state &state) :
 	width{ state.width },
@@ -452,6 +460,109 @@ void GraphBuilder::convert_resize(const resize_spec &spec, const params *params)
 	m_state.chroma_location_h = chroma_location_h;
 }
 
+void GraphBuilder::convert_unresize(const resize_spec &spec, const params *params)
+{
+	if (!m_factory)
+		throw error::InternalError{ "filter factory not set" };
+
+	unsigned subsample_w = spec.subsample_w;
+	unsigned subsample_h = spec.subsample_h;
+	ChromaLocationW chroma_location_w = spec.chroma_location_w;
+	ChromaLocationH chroma_location_h = spec.chroma_location_h;
+
+	bool image_shifted = spec.shift_w != 0.0 || spec.shift_h != 0.0;
+
+	if (is_greyscale(m_state)) {
+		subsample_w = 0;
+		subsample_h = 0;
+	}
+
+	if (!subsample_w)
+		chroma_location_w = ChromaLocationW::CHROMA_W_CENTER;
+	if (!subsample_h)
+		chroma_location_h = ChromaLocationH::CHROMA_H_CENTER;
+
+	if (m_state.width == spec.width &&
+	    m_state.height == spec.height &&
+	    m_state.subsample_w == subsample_w &&
+	    m_state.subsample_h == subsample_h &&
+	    m_state.chroma_location_w == chroma_location_w &&
+	    m_state.chroma_location_h == chroma_location_h &&
+	    !image_shifted)
+		return;
+
+	CPUClass cpu = params ? params->cpu : CPUClass::CPU_AUTO;
+
+	bool do_resize_luma = m_state.width != spec.width || m_state.height != spec.height || image_shifted;
+	bool do_resize_chroma = (m_state.width >> m_state.subsample_w != spec.width >> subsample_w) ||
+	                        (m_state.height >> m_state.subsample_h != spec.height >> subsample_h) ||
+	                        ((m_state.subsample_w || subsample_w) && m_state.chroma_location_w != chroma_location_w) ||
+	                        ((m_state.subsample_h || subsample_h) && m_state.chroma_location_h != chroma_location_h) ||
+	                        image_shifted;
+
+	FilterFactory::filter_list filter_list;
+	FilterFactory::filter_list filter_list_uv;
+
+	if (do_resize_luma) {
+		double extra_shift_h = luma_shift_factor(m_state.parity, m_state.height, spec.height);
+
+		auto conv = unresize::UnresizeConversion{ m_state.width, m_state.height, m_state.type }.
+			set_orig_width(spec.width).
+			set_orig_height(spec.height).
+			set_shift_w(spec.shift_w).
+			set_shift_h(spec.shift_h + extra_shift_h).
+			set_cpu(cpu);
+
+		filter_list = m_factory->create_unresize(conv);
+
+		if (is_rgb(m_state)) {
+			for (auto &&filter : filter_list) {
+				filter = ztd::make_unique<MuxFilter>(std::move(filter));
+			}
+		}
+	}
+
+	if (is_yuv(m_state) && do_resize_chroma) {
+		double extra_shift_w = chroma_shift_factor(m_state.chroma_location_w, chroma_location_w, m_state.subsample_w, subsample_w,
+												   m_state.parity, m_state.width, spec.width);
+		double extra_shift_h = chroma_shift_factor(m_state.chroma_location_h, chroma_location_h, m_state.subsample_h, subsample_h,
+												   m_state.parity, m_state.height, spec.height);
+
+		unsigned chroma_width_in = m_state.width >> m_state.subsample_w;
+		unsigned chroma_height_in = m_state.height >> m_state.subsample_h;
+		unsigned chroma_width_out = spec.width >> subsample_w;
+		unsigned chroma_height_out = spec.height >> subsample_h;
+
+		auto conv = unresize::UnresizeConversion{ chroma_width_in, chroma_height_in, m_state.type }.
+			set_orig_width(chroma_width_out).
+			set_orig_height(chroma_height_out).
+			set_shift_w(spec.shift_w / (1 << m_state.subsample_w) + extra_shift_w).
+			set_shift_h(spec.shift_h / (1 << m_state.subsample_h) + extra_shift_h).
+			set_cpu(cpu);
+
+		filter_list_uv = m_factory->create_unresize(conv);
+	}
+
+	for (auto &&filter : filter_list) {
+		attach_filter(std::move(filter));
+	}
+	for (auto &&filter : filter_list_uv) {
+		attach_filter_uv(std::move(filter));
+	}
+
+	m_state.width = spec.width;
+	m_state.height = spec.height;
+	m_state.subsample_w = subsample_w;
+	m_state.subsample_h = subsample_h;
+	m_state.chroma_location_w = chroma_location_w;
+	m_state.chroma_location_h = chroma_location_h;
+}
+
+auto GraphBuilder::get_state() const -> const state &
+{
+	return m_state;
+}
+
 GraphBuilder &GraphBuilder::set_factory(FilterFactory *factory)
 {
 	m_factory = factory;
@@ -535,6 +646,71 @@ std::unique_ptr<FilterGraph> GraphBuilder::complete_graph() try
 {
 	m_graph->complete();
 	return std::move(m_graph);
+} catch (const std::bad_alloc &) {
+	throw error::OutOfMemory{};
+}
+
+GraphBuilder &GraphBuilder::user_convert_colorspace(const colorspace::ColorspaceDefinition &colorspace, const params *params) try
+{
+	state orig_state = m_state;
+
+	if (m_state.type != PixelType::FLOAT)
+		convert_depth(PixelType::FLOAT, params);
+
+	if (m_state.subsample_w || m_state.subsample_h) {
+		resize_spec spec{ m_state };
+		spec.subsample_w = 0;
+		spec.subsample_h = 0;
+
+		convert_resize(spec, params);
+	}
+
+	convert_colorspace(colorspace, params);
+
+	if (!is_rgb(m_state)) {
+		resize_spec spec{ orig_state };
+		convert_resize(spec, params);
+	}
+
+	convert_depth(PixelFormat{ orig_state.type, orig_state.depth, orig_state.fullrange, false, is_ycgco(m_state) }, params);
+
+	return *this;
+} catch (const std::bad_alloc &) {
+	throw error::OutOfMemory{};
+}
+
+GraphBuilder &GraphBuilder::user_convert_depth(const PixelFormat &format, const params *params) try
+{
+	convert_depth(format, params);
+	return *this;
+} catch (const std::bad_alloc &) {
+	throw error::OutOfMemory{};
+}
+
+GraphBuilder &GraphBuilder::user_convert_resize(const resize_spec &spec, const params *params) try
+{
+	state orig_state = m_state;
+
+	if (m_state.type == PixelType::BYTE)
+		convert_depth(PixelFormat{ PixelType::WORD, 16, false, false, is_ycgco(m_state) }, params);
+	if (m_state.type == PixelType::HALF)
+		convert_depth(PixelType::FLOAT, params);
+
+	convert_resize(spec, params);
+	convert_depth(PixelFormat{ orig_state.type, orig_state.depth, orig_state.fullrange, is_ycgco(orig_state) }, params);
+	return *this;
+} catch (const std::bad_alloc &) {
+	throw error::OutOfMemory{};
+}
+
+GraphBuilder &GraphBuilder::user_convert_unresize(const resize_spec &spec, const params *params) try
+{
+	state orig_state = m_state;
+
+	convert_depth(PixelType::FLOAT, params);
+	convert_unresize(spec, params);
+	convert_depth(PixelFormat{ orig_state.type, orig_state.depth, orig_state.fullrange, is_ycgco(orig_state) }, params);
+	return *this;
 } catch (const std::bad_alloc &) {
 	throw error::OutOfMemory{};
 }
