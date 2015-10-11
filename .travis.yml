@@ -3,7 +3,7 @@ language: cpp
 compiler:
   - gcc
 install:
-  - if [ "$CXX" = "g++" ]; then export CXX="g++-5" CC="gcc-5"; fi
+  - if [ "$CXX" = "g++" ]; then export CXX="g++-4.9" CC="gcc-4.9"; fi
 env:
   global:
   # The next declaration is the encrypted COVERITY_SCAN_TOKEN, created
@@ -14,8 +14,8 @@ addons:
     sources:
       - ubuntu-toolchain-r-test
     packages:
-      - gcc-5
-      - g++-5
+      - gcc-4.9
+      - g++-4.9
   coverity_scan:
     project:
       name: "sekrit-twc/zimg"
